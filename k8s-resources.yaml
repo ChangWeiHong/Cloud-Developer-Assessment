@@ -1,0 +1,208 @@
+# ------------------------
+# 1) Namespace
+# ------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: example-namespace
+
+---
+# ------------------------
+# 2) TLS Secret (for Ingress)
+#    Replace base64 placeholders with your actual TLS cert/key
+# ------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tls-secret
+  namespace: example-namespace
+type: kubernetes.io/tls
+data:
+  tls.crt: <base64_encoded_valid_certificate>
+  tls.key: <base64_encoded_valid_key>
+---
+# ------------------------
+# 3) Application Secret
+#    Stores sensitive data as key-value
+# ------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secret
+  namespace: example-namespace
+type: Opaque
+stringData:
+  DB_PASSWORD: "superSecretPass123"
+
+---
+# ------------------------
+# 4) ConfigMap
+#    Stores non-sensitive config data
+# ------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: example-namespace
+data:
+  APP_ENV: "production"
+
+---
+# ------------------------
+# 5) Deployment
+#    Sample Deployment running NGINX
+# ------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example-deployment
+  namespace: example-namespace
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: example-app
+  template:
+    metadata:
+      labels:
+        app: example-app
+    spec:
+      containers:
+      - name: example-app
+        image: nginx:latest
+        ports:
+          - containerPort: 80
+        env:
+          - name: APP_ENV
+            valueFrom:
+              configMapKeyRef:
+                name: app-config
+                key: APP_ENV
+          - name: DB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: app-secret
+                key: DB_PASSWORD
+        volumeMounts:
+          - name: shared-storage
+            mountPath: /usr/share/nginx/html
+      volumes:
+      - name: shared-storage
+        persistentVolumeClaim:
+          claimName: efs-pvc
+
+---
+# ------------------------
+# 6) Service
+#    Exposes the Deployment internally on port 80
+# ------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: example-service
+  namespace: example-namespace
+spec:
+  selector:
+    app: example-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: ClusterIP
+
+---
+# ------------------------
+# 7) Ingress
+#    Terminates SSL and routes traffic to the Service
+# ------------------------
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: example-ingress
+  namespace: example-namespace
+  annotations:
+    # Depending on your environment/Ingress Controller
+    kubernetes.io/ingress.class: "nginx"
+spec:
+  tls:
+    - hosts:
+        - example.com
+      secretName: tls-secret
+  rules:
+    - host: example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: example-service
+                port:
+                  number: 80
+
+---
+# ------------------------
+# 8) PersistentVolume (PV)
+#    Backed by AWS EFS (example: fs-12345678)
+#    Requires the aws-efs-csi-driver
+# ------------------------
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: efs-pv
+spec:
+  capacity:
+    storage: 5Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  csi:
+    driver: efs.csi.aws.com
+    volumeHandle: fs-12345678
+  # If using a storageClass, define it here or remove "storageClassName: ''" in the PVC
+
+---
+# ------------------------
+# 9) PersistentVolumeClaim (PVC)
+#    Binds to the above EFS PV
+# ------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: efs-pvc
+  namespace: example-namespace
+spec:
+  accessModes:
+    - ReadWriteMany
+  # Remove if using a dynamic storageClass
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 5Gi
+  volumeName: efs-pv
+
+---
+# ------------------------
+# 10) HorizontalPodAutoscaler (HPA)
+#     Scales Deployment based on CPU usage
+# ------------------------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: example-hpa
+  namespace: example-namespace
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: example-deployment
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
